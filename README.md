@@ -32,9 +32,16 @@ A category is a folder under the notes folder, named by each note's `category` f
 
 ## Install
 
-There is no published npm package yet, so build from source. Either route gives a working server; pick one and use the matching client config below.
+There is no published npm package. Install the release tarball, which puts the `notes-mcp` command on your `PATH`:
 
-**Global command.** Pack a tarball and install it, which puts `notes-mcp` on your `PATH`:
+```bash
+# Download notes-mcp-<version>.tgz from the latest release, then:
+npm install -g ./notes-mcp-<version>.tgz
+```
+
+The asset is attached to each [release](https://github.com/megamaced/nc_notes-mcp/releases/latest).
+
+To build it yourself instead, either pack the same tarball:
 
 ```bash
 corepack pnpm install
@@ -42,7 +49,7 @@ corepack pnpm pack:tarball
 npm install -g ./notes-mcp-<version>.tgz
 ```
 
-**Run from the build directory.** No global install; point the client at the built entry point:
+or skip the global install and point the client at the built entry point:
 
 ```bash
 corepack pnpm install
