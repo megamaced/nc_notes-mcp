@@ -42,18 +42,21 @@ export interface Note {
 /**
  * Notes app settings, as exposed by `GET /settings`.
  *
- * The published API docs cover only `notesPath` and `fileSuffix`, but
- * `SettingsService` defines four more and a live server returns them. The index
- * signature keeps any further additions intact instead of silently dropping
- * them on a round-trip.
+ * This is the *public* shape, which differs from `SettingsService`'s internal
+ * one: `getPublic()` expands the internal `fileSuffix: "custom"` into the real
+ * extension and drops `customSuffix` entirely, and `setPublic()` treats any
+ * non-default `fileSuffix` as the custom suffix. So there is one suffix field
+ * here, holding an actual extension.
+ *
+ * Which of the remaining keys appear depends on the Notes version, so every
+ * field is optional and the index signature keeps unrecognised ones intact
+ * rather than dropping them on a round-trip.
  */
 export interface NotesSettings {
   /** Folder holding the note files, relative to the user's root. */
   notesPath?: string;
-  /** Suffix given to newly created note files, e.g. `.md`, or `custom`. */
+  /** Extension given to new note files, e.g. `.md` or `.org`. */
   fileSuffix?: string;
-  /** Suffix used when `fileSuffix` is `custom`. */
-  customSuffix?: string;
   /** Default editor mode for opening notes, e.g. `rich` or `edit`. */
   noteMode?: string;
   /** Whether dotfiles and dot-folders count as notes and categories. */

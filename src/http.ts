@@ -28,20 +28,29 @@ const RETRY_BASE_DELAY_MS = 1000;
 /** Upper bound on any single retry delay, including server-provided Retry-After. */
 export const MAX_RETRY_DELAY_MS = 30_000;
 /**
- * HTTP methods that may be repeated without changing the result beyond that of
- * a single call. POST is excluded: replaying a note creation would leave a
- * duplicate note behind.
+ * Methods whose response may be safely reproduced by replaying the request.
+ *
+ * Reads only. HTTP idempotency guarantees the server-side *state* after a
+ * repeated PUT or DELETE, not that the replay returns the same *response* — and
+ * the response is what this server reports back. A conditional `PUT` that
+ * commits and then loses its response to a dropped connection returns 412 on
+ * replay, because the first attempt already moved the etag; a committed DELETE
+ * returns 404. Either would report failure for a write that succeeded, and a
+ * caller retrying an append on that report would write the text twice.
+ *
+ * A 429 is handled separately: the server states it never processed the
+ * request, so replaying it is safe for any method.
  */
-const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+const REPLAYABLE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
- * A 5xx is ambiguous — the write may have been committed before the error.
- * Only replay it when replaying is harmless. A 429 is always safe to replay:
- * the server rejected the request outright.
+ * A 5xx is ambiguous — a write may have been committed before the error, and
+ * its response lost. Only replay it when the response itself is reproducible.
+ * A 429 is always safe to replay: the server rejected the request outright.
  */
-function isRetryable(status: number, idempotent: boolean): boolean {
+function isRetryable(status: number, replayable: boolean): boolean {
   if (status === 429) return true;
-  return idempotent && status >= 500 && status <= 599;
+  return replayable && status >= 500 && status <= 599;
 }
 
 /**
@@ -120,6 +129,23 @@ function parseRetryAfter(res: Response): number | null {
 
 const ERROR_BODY_MAX = 200;
 
+/** A response body that exceeded the configured size limit. */
+export class ResponseTooLargeError extends Error {
+  public readonly hint =
+    'Narrow the request (exclude=["content"], a smaller chunkSize, or a single ' +
+    'get_note) or raise NEXTCLOUD_MAX_RESPONSE_BYTES.';
+
+  constructor(label: string, limit: number, seen: number | null) {
+    super(
+      `Response too large: ${label} exceeded the ${limit}-byte limit` +
+        `${seen === null ? '' : ` (server declared ${seen} bytes)`} ` +
+        '[Narrow the request (exclude=["content"], a smaller chunkSize, or a single ' +
+        'get_note) or raise NEXTCLOUD_MAX_RESPONSE_BYTES.]',
+    );
+    this.name = 'ResponseTooLargeError';
+  }
+}
+
 /** A failed HTTP response (non-2xx status). */
 export class HttpError extends Error {
   /** Human-readable suggestion for how the caller might fix the problem. */
@@ -189,8 +215,10 @@ export interface NotesResponse<T> {
 export class NextcloudClient {
   private readonly authHeader: string;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(private readonly config: Config) {
+    this.maxResponseBytes = config.maxResponseBytes;
     const token = Buffer.from(`${config.user}:${config.password}`, 'utf8').toString('base64');
     this.authHeader = `Basic ${token}`;
     this.timeoutMs = config.timeoutMs;
@@ -220,7 +248,7 @@ export class NextcloudClient {
    */
   private async fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
     const method = (init.method ?? 'GET').toUpperCase();
-    const idempotent = IDEMPOTENT_METHODS.has(method);
+    const replayable = REPLAYABLE_METHODS.has(method);
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -233,7 +261,7 @@ export class NextcloudClient {
         if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
           throw new TimeoutError(label, this.timeoutMs);
         }
-        if (isTransientNetworkError(err) && idempotent && attempt < MAX_RETRIES) {
+        if (isTransientNetworkError(err) && replayable && attempt < MAX_RETRIES) {
           lastError = err as Error;
           await sleep(backoffDelay(attempt));
           continue;
@@ -243,10 +271,11 @@ export class NextcloudClient {
 
       if (res.ok || res.status === 412) return res;
 
-      const text = await res.text().catch(() => '');
+      // Bounded: an error body can be an arbitrarily large proxy error page.
+      const text = await this.readBounded(res, label).catch(() => '');
       const httpError = new HttpError(res.status, res.statusText, text);
 
-      if (isRetryable(res.status, idempotent) && attempt < MAX_RETRIES) {
+      if (isRetryable(res.status, replayable) && attempt < MAX_RETRIES) {
         lastError = httpError;
         await sleep(parseRetryAfter(res) ?? backoffDelay(attempt));
         continue;
@@ -254,6 +283,42 @@ export class NextcloudClient {
       throw httpError;
     }
     throw lastError ?? new Error('Unexpected retry exhaustion');
+  }
+
+  /**
+   * Read a response body, refusing to buffer more than the configured limit.
+   *
+   * `Response.text()` buffers whatever the peer sends, so the cap has to be
+   * applied while reading rather than afterwards: by the time a 200-character
+   * snippet is taken, the whole body is already in memory. `Content-Length` is
+   * checked first when present so an oversized body is rejected before a single
+   * chunk is read.
+   */
+  private async readBounded(res: Response, label: string): Promise<string> {
+    const declared = res.headers.get('Content-Length');
+    if (declared !== null) {
+      const size = Number(declared);
+      if (Number.isFinite(size) && size > this.maxResponseBytes) {
+        throw new ResponseTooLargeError(label, this.maxResponseBytes, size);
+      }
+    }
+    if (!res.body) return '';
+
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      if (total > this.maxResponseBytes) {
+        await reader.cancel().catch(() => {});
+        throw new ResponseTooLargeError(label, this.maxResponseBytes, null);
+      }
+      chunks.push(value);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks));
   }
 
   // ---------------------------------------------------------------------------
@@ -297,7 +362,7 @@ export class NextcloudClient {
       `${method} ${path}${qs}`,
     );
 
-    const text = await res.text();
+    const text = await this.readBounded(res, `${method} ${path}`);
     let parsed: unknown;
     if (text === '') {
       parsed = null;

@@ -32,6 +32,18 @@ A category is a folder under the notes folder, named by each note's `category` f
 
 ## Install
 
+There is no published npm package yet, so build from source. Either route gives a working server; pick one and use the matching client config below.
+
+**Global command.** Pack a tarball and install it, which puts `notes-mcp` on your `PATH`:
+
+```bash
+corepack pnpm install
+corepack pnpm pack:tarball
+npm install -g ./notes-mcp-<version>.tgz
+```
+
+**Run from the build directory.** No global install; point the client at the built entry point:
+
 ```bash
 corepack pnpm install
 corepack pnpm build
@@ -39,7 +51,7 @@ corepack pnpm build
 
 ## Configuration
 
-Add to your MCP client config (Claude Code shown):
+Add to your MCP client config (Claude Code shown). After a global install:
 
 ```json
 {
@@ -47,6 +59,24 @@ Add to your MCP client config (Claude Code shown):
     "notes": {
       "command": "notes-mcp",
       "args": [],
+      "env": {
+        "NEXTCLOUD_URL": "https://your-nextcloud.example.com",
+        "NEXTCLOUD_USER": "your-username",
+        "NEXTCLOUD_APP_PASSWORD": "xxxx-xxxx-xxxx-xxxx-xxxx"
+      }
+    }
+  }
+}
+```
+
+Or, running from the build directory, with an absolute path to `dist/index.js`:
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "node",
+      "args": ["/absolute/path/to/notes-mcp/dist/index.js"],
       "env": {
         "NEXTCLOUD_URL": "https://your-nextcloud.example.com",
         "NEXTCLOUD_USER": "your-username",
@@ -70,7 +100,15 @@ corepack pnpm typecheck
 corepack pnpm build      # tsc -> dist/
 ```
 
-Required env vars: `NEXTCLOUD_URL`, `NEXTCLOUD_USER`, `NEXTCLOUD_APP_PASSWORD`. Optional: `NEXTCLOUD_TIMEOUT_MS` (per-request deadline, default 60000), `DEBUG` (log each request to stderr).
+Required env vars: `NEXTCLOUD_URL`, `NEXTCLOUD_USER`, `NEXTCLOUD_APP_PASSWORD`.
+
+Optional:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NEXTCLOUD_TIMEOUT_MS` | `60000` | Per-request deadline. Must be a whole number of milliseconds, at most 2147483647. |
+| `NEXTCLOUD_MAX_RESPONSE_BYTES` | `10485760` | Largest response body buffered. Raise it for very large notes. |
+| `DEBUG` | unset | Log each request to stderr. |
 
 ## Disclosure
 

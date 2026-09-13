@@ -30,7 +30,9 @@ This is **not** an OCS API: responses are bare JSON, there is no `ocs.meta` enve
 
 10. **Notes carry five fields the docs do not mention,** all unconditional: `internalPath`, `shareTypes`, `isShared`, `error`, `errorType`.
 
-11. **Settings has six keys, not the two documented.** `SettingsService` defines `notesPath`, `fileSuffix`, `customSuffix`, `noteMode`, `showHidden` and `loadRecentOnStartUp`. A live server returns `noteMode`; the published docs list only the first two.
+11. **The settings endpoint exposes a different shape from the one `SettingsService` defines internally.** `getPublic()` expands the internal `fileSuffix: "custom"` into the real extension and then *unsets* `customSuffix`; `setPublic()` mirrors it, treating any `fileSuffix` that is not one of the defaults as the custom suffix itself. So the public API has one suffix field, holding an actual extension like `.org` — sending the internal pair `{"fileSuffix": "custom", "customSuffix": ".org"}` stores the literal string `custom` and yields a `.custom` extension.
+
+    Which of the remaining keys appear depends on the Notes version: `getPublic()` returns everything else `SettingsService` defines, but a live Nextcloud 33 instance returned only `notesPath`, `fileSuffix` and `noteMode`. The published docs list just the first two.
 
 12. **`showHidden` changes what counts as a note.** It is a settings flag, but it governs the folder walk: with it set, dotfiles and dot-folders become notes and categories.
 
@@ -93,11 +95,12 @@ Excludable via `exclude`: `content`, `title`, `category`, `favorite`, `modified`
 | Key | Type | Notes |
 | --- | --- | --- |
 | `notesPath` | string | Notes folder, relative to the user's root. |
-| `fileSuffix` | string | Suffix for new notes, or `custom`. |
-| `customSuffix` | string | Used when `fileSuffix` is `custom`. Undocumented. |
+| `fileSuffix` | string | The extension itself, e.g. `.md` or `.org`. See gotcha 11. |
 | `noteMode` | string | Default editor mode, e.g. `rich`. Undocumented. |
-| `showHidden` | boolean | See gotcha 12. Undocumented. |
-| `loadRecentOnStartUp` | boolean | Undocumented. |
+| `showHidden` | boolean | See gotcha 12. Undocumented. Version-dependent. |
+| `loadRecentOnStartUp` | boolean | Undocumented. Version-dependent. |
+
+`customSuffix` exists internally but is never part of a public request or response.
 
 ---
 

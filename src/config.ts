@@ -11,12 +11,30 @@ export interface Config {
   password: string;
   /** Per-request deadline in milliseconds. */
   timeoutMs: number;
+  /** Largest response body to buffer, in bytes. */
+  maxResponseBytes: number;
 }
 
 const REQUIRED = ['NEXTCLOUD_URL', 'NEXTCLOUD_USER', 'NEXTCLOUD_APP_PASSWORD'] as const;
 
 /** Default per-request deadline; override with NEXTCLOUD_TIMEOUT_MS. */
 export const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Largest usable timeout, in milliseconds.
+ *
+ * `AbortSignal.timeout` documents a ceiling of 4294967295 and throws a
+ * `RangeError` on a fraction, but that ceiling is not the usable one: above
+ * 2^31-1 Node's timer overflows, emits `TimeoutOverflowWarning` and silently
+ * clamps the delay to **1ms**, so every request would abort immediately. A
+ * value that turns a long timeout into an instant failure is worse than one
+ * that is rejected, so the bound is the 32-bit signed maximum and the check
+ * happens at startup, where the message can still name the variable.
+ */
+export const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Default cap on a single response body; override with NEXTCLOUD_MAX_RESPONSE_BYTES. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 /**
  * Reduce a base URL to origin + pathname, rejecting anything that would not
@@ -58,13 +76,23 @@ export function canonicalizeBaseUrl(rawUrl: string): string {
   return `${url.origin}${pathname}`;
 }
 
-function parseTimeout(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return DEFAULT_TIMEOUT_MS;
-  const ms = Number(raw);
-  if (!Number.isFinite(ms) || ms <= 0) {
-    throw new Error(`NEXTCLOUD_TIMEOUT_MS must be a positive number of milliseconds, got "${raw}"`);
+/**
+ * Parse a positive-integer environment variable, rejecting the values that
+ * would otherwise fail deep inside a request instead of at startup.
+ */
+function parsePositiveInt(raw: string | undefined, name: string, fallback: number, max: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number, got "${raw}"`);
   }
-  return ms;
+  if (!Number.isInteger(value)) {
+    throw new Error(`${name} must be a whole number, got "${raw}"`);
+  }
+  if (value > max) {
+    throw new Error(`${name} must be at most ${max}, got "${raw}"`);
+  }
+  return value;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -81,6 +109,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     url: canonicalizeBaseUrl(env.NEXTCLOUD_URL!.trim()),
     user: env.NEXTCLOUD_USER!.trim(),
     password: env.NEXTCLOUD_APP_PASSWORD!,
-    timeoutMs: parseTimeout(env.NEXTCLOUD_TIMEOUT_MS),
+    timeoutMs: parsePositiveInt(
+      env.NEXTCLOUD_TIMEOUT_MS,
+      'NEXTCLOUD_TIMEOUT_MS',
+      DEFAULT_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+    ),
+    maxResponseBytes: parsePositiveInt(
+      env.NEXTCLOUD_MAX_RESPONSE_BYTES,
+      'NEXTCLOUD_MAX_RESPONSE_BYTES',
+      DEFAULT_MAX_RESPONSE_BYTES,
+      Number.MAX_SAFE_INTEGER,
+    ),
   };
 }

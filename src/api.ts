@@ -18,9 +18,17 @@ export function isNoteStub(note: Note): boolean {
   return Object.keys(note).length === 1 && 'id' in note;
 }
 
-/** True when `category` is `parent` itself or nested beneath it. */
+/**
+ * True when `category` is `parent` itself or nested beneath it.
+ *
+ * `""` is the uncategorized category, not a root that contains everything:
+ * `work` is not nested inside it, it simply has no parent. Treating `""` as
+ * universal would make the uncategorized row of a category summary report every
+ * note on the server, and would disagree with `listNotes`, which refuses to
+ * recurse from `""` for the same reason.
+ */
 export function isWithinCategory(category: string, parent: string): boolean {
-  if (parent === '') return true;
+  if (parent === '') return category === '';
   return category === parent || category.startsWith(`${parent}/`);
 }
 
@@ -217,7 +225,16 @@ export async function listCategories(client: NextcloudClient): Promise<CategoryS
  * collapsed into one success or failure.
  */
 export interface RenameCategoryResult {
-  moved: { id: number; title: string; from: string; to: string }[];
+  moved: {
+    id: number;
+    /** Title as the server reports it after the move. */
+    title: string;
+    from: string;
+    /** Category as the server stored it. */
+    to: string;
+    /** Present only when the server sanitised the path into something else. */
+    requested?: string;
+  }[];
   failed: { id: number; title: string; error: string }[];
 }
 
@@ -241,8 +258,18 @@ export async function renameCategory(
     const next = current === from ? to : `${to}${current.slice(from.length)}`;
     const title = note.title ?? `#${note.id}`;
     try {
-      await updateNote(client, note.id, { category: next }, note.etag);
-      result.moved.push({ id: note.id, title, from: current, to: next });
+      // Report what the server stored, not what was asked for: it sanitises
+      // category segments and resolves title collisions, so the requested path
+      // is not necessarily the one that now exists.
+      const updated = await updateNote(client, note.id, { category: next }, note.etag);
+      const actual = updated.category ?? next;
+      result.moved.push({
+        id: note.id,
+        title: updated.title ?? title,
+        from: current,
+        to: actual,
+        ...(actual === next ? {} : { requested: next }),
+      });
     } catch (err) {
       result.failed.push({ id: note.id, title, error: err instanceof Error ? err.message : String(err) });
     }

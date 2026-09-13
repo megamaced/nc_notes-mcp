@@ -39,14 +39,46 @@ const Empty = z.object({}).strict();
  */
 const Bool = z.union([z.boolean(), z.enum(['true', 'false']).transform((v) => v === 'true')]);
 
-const NoteId = z.coerce.number().int().positive();
+/**
+ * A note id: a positive safe integer, or the decimal string spelling of one.
+ *
+ * Not `z.coerce.number()`, which is `Number(value)` and therefore accepts far
+ * more than the advertised `integer` schema: `true` and `["1"]` both become
+ * `1`, and `"0x10"` becomes `16`. A client that ignores the published schema
+ * could aim a destructive tool at an unrelated note that way, so the grammar is
+ * enforced here rather than assumed. The JSON Schema is the documentation; this
+ * is the trust boundary.
+ */
+const NoteId = z
+  .union([z.number(), z.string().regex(/^[1-9]\d*$/, 'must be a positive decimal integer')])
+  .transform((v) => (typeof v === 'number' ? v : Number(v)))
+  .refine((n) => Number.isSafeInteger(n) && n > 0, {
+    message: 'must be a positive integer within the safe integer range',
+  });
 
 const ExcludableFields = z.array(
   z.enum(['content', 'title', 'category', 'favorite', 'modified', 'readonly']),
 );
 
-function jsonResult(data: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+/**
+ * Largest JSON result handed back to the client.
+ *
+ * A result far past this is unusable anyway: it displaces the caller's context
+ * rather than informing it. Refusing with guidance beats truncating, which
+ * would produce invalid JSON the caller cannot parse.
+ */
+const MAX_RESULT_BYTES = 1024 * 1024;
+
+function jsonResult(data: unknown, guidance?: string): CallToolResult {
+  const text = JSON.stringify(data, null, 2);
+  const size = Buffer.byteLength(text, 'utf8');
+  if (size > MAX_RESULT_BYTES) {
+    return errorResult(
+      `Result too large: ${size} bytes exceeds the ${MAX_RESULT_BYTES}-byte limit.` +
+        (guidance ? ` ${guidance}` : ''),
+    );
+  }
+  return { content: [{ type: 'text', text }] };
 }
 
 function textResult(text: string): CallToolResult {
@@ -135,13 +167,16 @@ const listNotesTool: ToolDef<typeof ListNotesArgs> = {
       chunkSize: args.chunkSize,
       chunkCursor: args.chunkCursor,
     });
-    return jsonResult({
-      count: result.notes.length,
-      notes: result.notes,
-      ...(result.chunkCursor
-        ? { chunkCursor: result.chunkCursor, chunkPending: result.chunkPending }
-        : {}),
-    });
+    return jsonResult(
+      {
+        count: result.notes.length,
+        notes: result.notes,
+        ...(result.chunkCursor
+          ? { chunkCursor: result.chunkCursor, chunkPending: result.chunkPending }
+          : {}),
+      },
+      'Retry with exclude=["content"] for metadata only, or a chunkSize to page through them.',
+    );
   },
 };
 
@@ -159,7 +194,7 @@ const getNoteTool: ToolDef<typeof GetNoteArgs> = {
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'integer' },
+        id: { type: 'integer', minimum: 1 },
         exclude: {
           type: 'array',
           items: { type: 'string', enum: ['content', 'title', 'category', 'favorite', 'modified', 'readonly'] },
@@ -248,7 +283,7 @@ const updateNoteTool: ToolDef<typeof UpdateNoteArgs> = {
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'integer' },
+        id: { type: 'integer', minimum: 1 },
         title: { type: 'string' },
         content: { type: 'string', description: 'Replaces the entire note body.' },
         category: { type: 'string' },
@@ -286,7 +321,7 @@ const appendToNoteTool: ToolDef<typeof AppendArgs> = {
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'integer' },
+        id: { type: 'integer', minimum: 1 },
         text: { type: 'string' },
         separator: { type: 'string', description: 'Inserted between the existing body and the new text. Default: a blank line.' },
       },
@@ -316,7 +351,7 @@ const deleteNoteTool: ToolDef<typeof DeleteNoteArgs> = {
       'Files app until the trash is emptied, but this server cannot restore it.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'integer' } },
+      properties: { id: { type: 'integer', minimum: 1 } },
       required: ['id'],
       additionalProperties: false,
     },
@@ -373,7 +408,7 @@ const setNoteCategoryTool: ToolDef<typeof SetCategoryArgs> = {
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'integer' },
+        id: { type: 'integer', minimum: 1 },
         category: { type: 'string', description: '"/"-delimited path; "" for uncategorized.' },
         etag: { type: 'string' },
       },
@@ -383,7 +418,10 @@ const setNoteCategoryTool: ToolDef<typeof SetCategoryArgs> = {
     annotations: {
       title: 'Set note category',
       readOnlyHint: false,
-      destructiveHint: false,
+      // Overwrites the note's existing category and moves the file: a move, not
+      // an additive update, so clients should treat it as they treat any other
+      // overwrite.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -456,20 +494,12 @@ const getSettingsTool: ToolDef<typeof Empty> = {
   handler: async (_args, ctx) => jsonResult(await getSettings(ctx.client)),
 };
 
-const SETTINGS_KEYS = [
-  'notesPath',
-  'fileSuffix',
-  'customSuffix',
-  'noteMode',
-  'showHidden',
-  'loadRecentOnStartUp',
-] as const;
+const SETTINGS_KEYS = ['notesPath', 'fileSuffix', 'noteMode', 'showHidden', 'loadRecentOnStartUp'] as const;
 
 const UpdateSettingsArgs = z
   .object({
     notesPath: z.string().optional(),
     fileSuffix: z.string().optional(),
-    customSuffix: z.string().optional(),
     noteMode: z.string().optional(),
     showHidden: Bool.optional(),
     loadRecentOnStartUp: Bool.optional(),
@@ -484,14 +514,15 @@ const updateSettingsTool: ToolDef<typeof UpdateSettingsArgs> = {
   tool: {
     name: 'update_settings',
     description:
-      'Change the Notes app settings. Changing notesPath re-points the app at a different ' +
-      'folder: notes in the old folder stop appearing in Notes until it is pointed back.',
+      'Change the Notes app settings. Set fileSuffix to the extension itself, including the ' +
+      'dot — ".md", ".org", or any custom extension; the server stores a non-standard one as ' +
+      'the custom suffix. Changing notesPath re-points the app at a different folder: notes in ' +
+      'the old folder stop appearing in Notes until it is pointed back.',
     inputSchema: {
       type: 'object',
       properties: {
         notesPath: { type: 'string', description: "Folder for note files, relative to the user's root." },
-        fileSuffix: { type: 'string', description: 'Suffix for new note files, e.g. ".md", or "custom".' },
-        customSuffix: { type: 'string', description: 'Suffix used when fileSuffix is "custom".' },
+        fileSuffix: { type: 'string', description: 'Suffix for new note files, e.g. ".md" or ".org". Any extension is accepted.' },
         noteMode: { type: 'string', description: 'Default editor mode, e.g. "rich" or "edit".' },
         showHidden: { type: 'boolean', description: 'Count dotfiles and dot-folders as notes and categories.' },
         loadRecentOnStartUp: { type: 'boolean' },
