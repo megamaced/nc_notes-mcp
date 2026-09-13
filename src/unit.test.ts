@@ -269,13 +269,37 @@ describe('#1 ambiguous writes are not replayed', () => {
     });
   });
 
-  test('an oversized body is refused instead of buffered', async () => {
+  test('an oversized body is refused on its declared Content-Length', async () => {
     const big = () =>
       new Response('x'.repeat(2048), { status: 200, headers: { 'Content-Length': '2048' } });
     await withFetch([big], async () => {
       const client = new NextcloudClient({ ...config, maxResponseBytes: 512 });
       await assert.rejects(() => client.notes('GET', '/notes'), /Response too large/);
     });
+  });
+
+  test('a chunked body with no Content-Length is cut off mid-stream', async () => {
+    // The preflight cannot help here, so the limit has to be enforced while
+    // reading. Counts chunks to prove the read stopped rather than buffering
+    // everything and checking afterwards.
+    let produced = 0;
+    const chunked = () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            produced += 1;
+            if (produced > 100) return controller.close();
+            controller.enqueue(new TextEncoder().encode('x'.repeat(256)));
+          },
+        }),
+        { status: 200 },
+      );
+
+    await withFetch([chunked], async () => {
+      const client = new NextcloudClient({ ...config, maxResponseBytes: 512 });
+      await assert.rejects(() => client.notes('GET', '/notes'), /Response too large/);
+    });
+    assert.ok(produced < 100, `should have stopped early, read ${produced} chunks`);
   });
 });
 
